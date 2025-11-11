@@ -1,0 +1,372 @@
+import tkinter as tk
+from tkinter import messagebox
+import ttkbootstrap as tb
+from PIL import Image, ImageTk
+import qrcode
+import random
+from typing import Dict, List, Set, Tuple
+
+
+# ---------- CONFIG ----------
+TICKET_PRICE = 150  # per ticket
+SNACK_PRICES = {
+    "Popcorn Small": 100,
+    "Popcorn Medium": 150,
+    "Popcorn Large": 200,
+    "Coke": 80,
+}
+MOVIES = ["Jalsa", "Kushi", "They Call Him OG"]
+SHOWTIMES = ["10:30 AM", "2:00 PM", "5:30 PM", "9:00 PM"]
+MAX_TICKETS = 6
+ROWS = "ABCDEFGHIJ"   # 10 rows
+COLS = 10             # 10 seats per row -> 100 seats total
+# ----------------------------
+
+
+class App(tb.Window):
+    def __init__(self):
+        super().__init__(themename="superhero")
+        self.title("Asian Cinemas - Ticket Booking")
+        self.geometry("880x640")
+        self.resizable(False, False)
+
+        # Global state
+        self.movie = tk.StringVar()
+        self.showtime = tk.StringVar()
+        self.tickets = tk.IntVar(value=1)
+        self.selected_seats: List[str] = []
+        self.snack_qty: Dict[str, tk.IntVar] = {s: tk.IntVar(value=0) for s in SNACK_PRICES.keys()}
+        self.payment_mode = tk.StringVar(value="")
+        self.booking_id = None
+
+        # Seat inventory per (movie, showtime)
+        self.booked_seats: Dict[Tuple[str, str], Set[str]] = {}
+
+        # Frame container
+        self.container = tb.Frame(self)
+        self.container.pack(fill="both", expand=True)
+        self.container.grid_rowconfigure(0, weight=1)
+        self.container.grid_columnconfigure(0, weight=1)
+
+        # Pages
+        self.frames = {}
+        for F in (WelcomePage, BookingPage, SeatSelectionPage, SnacksPage, PaymentPage, TicketPage):
+            frame = F(parent=self.container, controller=self)
+            self.frames[F.__name__] = frame
+            frame.grid(row=0, column=0, sticky="nsew")
+
+        self.show("WelcomePage")
+
+    def show(self, name: str):
+        frame = self.frames[name]
+        if hasattr(frame, "on_show"):
+            frame.on_show()
+        frame.tkraise()
+
+    # ---- Helpers ----
+    def total_cost(self) -> int:
+        tickets_cost = self.tickets.get() * TICKET_PRICE
+        snacks_cost = sum(SNACK_PRICES[s] * self.snack_qty[s].get() for s in SNACK_PRICES)
+        return tickets_cost + snacks_cost
+
+    def reset_booking_state(self):
+        self.movie.set("")
+        self.showtime.set("")
+        self.tickets.set(1)
+        self.selected_seats.clear()
+        for s in self.snack_qty.values():
+            s.set(0)
+        self.payment_mode.set("")
+        self.booking_id = None
+
+
+# ---------- PAGES ----------
+
+class WelcomePage(tb.Frame):
+    def __init__(self, parent, controller: App):
+        super().__init__(parent)
+        self.controller = controller
+
+        tb.Label(self, text="🎬 WELCOME TO ASIAN CINEMAS 🎬",
+                 font=("Arial Black", 28, "bold"), foreground="gold").pack(pady=60)
+        tb.Label(self, text="Experience movies like never before.",
+                 font=("Arial", 14)).pack(pady=6)
+        tb.Label(self, text="📽️ 🍿 🎥", font=("Arial", 36)).pack(pady=10)
+
+        tb.Button(self, text="BOOK MY TICKETS", bootstyle="success",
+                  command=lambda: controller.show("BookingPage")).pack(pady=30, ipadx=16, ipady=6)
+
+    def on_show(self):
+        self.controller.reset_booking_state()
+
+
+class BookingPage(tb.Frame):
+    def __init__(self, parent, controller: App):
+        super().__init__(parent)
+        self.controller = controller
+
+        tb.Label(self, text="🎟️ Booking Details", font=("Arial Black", 20)).pack(pady=20)
+
+        # Movie
+        block = tb.Frame(self); block.pack(pady=6)
+        tb.Label(block, text="Select Movie:", font=("Arial", 12, "bold")).pack(side="left", padx=8)
+        self.movie_cb = tb.Combobox(block, textvariable=controller.movie, values=MOVIES, state="readonly", width=30)
+        self.movie_cb.pack(side="left")
+
+        # Showtime
+        block = tb.Frame(self); block.pack(pady=6)
+        tb.Label(block, text="Select Showtime:", font=("Arial", 12, "bold")).pack(side="left", padx=8)
+        self.showtime_cb = tb.Combobox(block, textvariable=controller.showtime, values=SHOWTIMES, state="readonly", width=30)
+        self.showtime_cb.pack(side="left")
+
+        # Tickets
+        block = tb.Frame(self); block.pack(pady=6)
+        tb.Label(block, text=f"Number of Tickets (max {MAX_TICKETS}):", font=("Arial", 12, "bold")).pack(side="left", padx=8)
+        self.ticket_spin = tb.Spinbox(block, from_=1, to=MAX_TICKETS, textvariable=controller.tickets, width=6)
+        self.ticket_spin.pack(side="left")
+
+        tb.Label(self, text="Note: You cannot book more than 6 tickets in a single order.",
+                 font=("Arial", 10, "italic")).pack(pady=6)
+
+        btns = tb.Frame(self); btns.pack(pady=20)
+        tb.Button(btns, text="NEXT: Select Seats", bootstyle="primary",
+                  command=self._go_seats).pack(side="left", padx=6)
+        tb.Button(btns, text="Back", bootstyle="warning",
+                  command=lambda: controller.show("WelcomePage")).pack(side="left", padx=6)
+
+    def _go_seats(self):
+        c = self.controller
+        # Hard validation even if user typed into Spinbox
+        try:
+            n = int(c.tickets.get())
+        except Exception:
+            messagebox.showerror("Invalid Input", "Please enter a valid number of tickets.")
+            return
+        if not c.movie.get() or not c.showtime.get():
+            messagebox.showwarning("Missing Info", "Please select both movie and showtime.")
+            return
+        if n < 1 or n > MAX_TICKETS:
+            messagebox.showerror("Limit Exceeded", f"You can book between 1 and {MAX_TICKETS} tickets only.")
+            c.tickets.set(min(max(n, 1), MAX_TICKETS))
+            return
+
+        c.show("SeatSelectionPage")
+
+
+class SeatSelectionPage(tb.Frame):
+    def __init__(self, parent, controller: App):
+        super().__init__(parent)
+        self.controller = controller
+
+        self.header = tb.Label(self, text="Select Your Seats", font=("Arial Black", 18))
+        self.header.pack(pady=12)
+
+        # Screen banner
+        self.screen_banner = tb.Label(self, text="SCREEN THIS SIDE",
+                                      font=("Arial Black", 12), bootstyle="inverse-dark")
+        self.screen_banner.pack(pady=(0, 8), ipadx=260, ipady=4)
+
+        # Grid container
+        self.grid_container = tb.Frame(self)
+        self.grid_container.pack(pady=8)
+
+        # Legend
+        legend = tb.Frame(self); legend.pack(pady=4)
+        tb.Label(legend, text="Legend: ").pack(side="left")
+        tb.Label(legend, text="Available", bootstyle="secondary").pack(side="left", padx=6)
+        tb.Label(legend, text="Selected", bootstyle="info").pack(side="left", padx=6)
+        tb.Label(legend, text="Booked", bootstyle="danger").pack(side="left", padx=6)
+
+        # Buttons
+        btns = tb.Frame(self); btns.pack(pady=16)
+        tb.Button(btns, text="Confirm Seats", bootstyle="success", command=self._confirm).pack(side="left", padx=6)
+        tb.Button(btns, text="Back", bootstyle="warning",
+                  command=lambda: controller.show("BookingPage")).pack(side="left", padx=6)
+
+        self.seat_buttons: Dict[str, tb.Button] = {}
+
+    def on_show(self):
+        # Refresh grid each time page shows
+        for w in self.grid_container.winfo_children():
+            w.destroy()
+        self.seat_buttons.clear()
+        self.controller.selected_seats.clear()
+
+        c = self.controller
+        key = (c.movie.get(), c.showtime.get())
+        booked = self.controller.booked_seats.get(key, set())
+
+        # Build 10x10 grid: rows A-J, cols 1-10
+        for r, row_char in enumerate(ROWS):
+            # Row label
+            tb.Label(self.grid_container, text=row_char, width=2, anchor="e").grid(row=r+1, column=0, padx=4)
+            for col in range(1, COLS + 1):
+                seat_id = f"{row_char}{col}"
+                btn = tb.Button(self.grid_container, text=str(col), width=3, bootstyle="secondary",
+                                command=lambda s=seat_id: self._toggle(s))
+                btn.grid(row=r+1, column=col, padx=2, pady=2)
+                if seat_id in booked:
+                    btn.configure(bootstyle="danger", state="disabled")  # already booked
+                self.seat_buttons[seat_id] = btn
+
+        # Column numbers on top
+        tb.Label(self.grid_container, text="", width=2).grid(row=0, column=0)
+        for col in range(1, COLS + 1):
+            tb.Label(self.grid_container, text=str(col), width=3, anchor="center").grid(row=0, column=col)
+
+        self.header.config(text=f"Select Your Seats  •  {c.movie.get()}  •  {c.showtime.get()}  •  Tickets: {c.tickets.get()}")
+
+    def _toggle(self, seat_id: str):
+        c = self.controller
+        if seat_id in c.selected_seats:
+            c.selected_seats.remove(seat_id)
+            self.seat_buttons[seat_id].configure(bootstyle="secondary")
+        else:
+            if len(c.selected_seats) >= c.tickets.get():
+                messagebox.showwarning("Seat Limit",
+                                       f"You can select only {c.tickets.get()} seats.")
+                return
+            c.selected_seats.append(seat_id)
+            self.seat_buttons[seat_id].configure(bootstyle="info")
+
+    def _confirm(self):
+        c = self.controller
+        if len(c.selected_seats) != c.tickets.get():
+            messagebox.showerror("Seats Needed",
+                                 f"Please select exactly {c.tickets.get()} seats.")
+            return
+        # Move on
+        c.show("SnacksPage")
+
+
+class SnacksPage(tb.Frame):
+    def __init__(self, parent, controller: App):
+        super().__init__(parent)
+        self.controller = controller
+
+        tb.Label(self, text="Choose Snacks (Optional)", font=("Arial Black", 18)).pack(pady=14)
+
+        grid = tb.Frame(self); grid.pack(pady=8)
+        r = 0
+        for name, price in SNACK_PRICES.items():
+            row = tb.Frame(grid); row.grid(row=r, column=0, sticky="w", pady=4)
+            tb.Label(row, text=f"{name} (₹{price})", width=22, anchor="w").pack(side="left", padx=6)
+            tb.Label(row, text="Qty:").pack(side="left")
+            tb.Spinbox(row, from_=0, to=10, textvariable=controller.snack_qty[name], width=5).pack(side="left", padx=6)
+            r += 1
+
+        info = tb.Label(self, text="", font=("Arial", 11))
+        info.pack(pady=8)
+        self._info_label = info
+
+        btns = tb.Frame(self); btns.pack(pady=16)
+        tb.Button(btns, text="NEXT: Payment", bootstyle="primary", command=self._go_payment).pack(side="left", padx=6)
+        tb.Button(btns, text="Back", bootstyle="warning",
+                  command=lambda: controller.show("SeatSelectionPage")).pack(side="left", padx=6)
+
+    def on_show(self):
+        total = self.controller.total_cost()
+        self._info_label.config(text=f"Current Total (incl. snacks if any): ₹{total}")
+
+    def _go_payment(self):
+        self.controller.show("PaymentPage")
+
+
+class PaymentPage(tb.Frame):
+    def __init__(self, parent, controller: App):
+        super().__init__(parent)
+        self.controller = controller
+
+        tb.Label(self, text="💳 Payment", font=("Arial Black", 20)).pack(pady=20)
+        self.summary = tb.Label(self, text="", font=("Arial", 12))
+        self.summary.pack(pady=6)
+
+        block = tb.Frame(self); block.pack(pady=10)
+        tb.Label(block, text="Select Payment Method:", font=("Arial", 12, "bold")).pack(side="left", padx=6)
+        self.pay_cb = tb.Combobox(block, textvariable=controller.payment_mode,
+                                  values=["UPI", "Credit Card", "Debit Card", "Wallet"], state="readonly", width=20)
+        self.pay_cb.pack(side="left")
+
+        btns = tb.Frame(self); btns.pack(pady=18)
+        tb.Button(btns, text="Pay & Confirm", bootstyle="success", command=self._confirm).pack(side="left", padx=6)
+        tb.Button(btns, text="Back", bootstyle="warning",
+                  command=lambda: controller.show("SnacksPage")).pack(side="left", padx=6)
+
+    def on_show(self):
+        c = self.controller
+        snack_lines = [f"{name} x{c.snack_qty[name].get()}" for name in SNACK_PRICES if c.snack_qty[name].get() > 0]
+        snack_text = ", ".join(snack_lines) if snack_lines else "None"
+        summary_txt = (
+            f"Movie: {c.movie.get()}   |   Showtime: {c.showtime.get()}\n"
+            f"Tickets: {c.tickets.get()}  (₹{TICKET_PRICE} each)\n"
+            f"Seats: {', '.join(c.selected_seats)}\n"
+            f"Snacks: {snack_text}\n"
+            f"Total: ₹{c.total_cost()}"
+        )
+        self.summary.config(text=summary_txt)
+
+    def _confirm(self):
+        c = self.controller
+        if not c.payment_mode.get():
+            messagebox.showwarning("Select Payment", "Please choose a payment method.")
+            return
+
+        # Payment success (simulated)
+        messagebox.showinfo("Payment Successful", f"Payment of ₹{c.total_cost()} via {c.payment_mode.get()} was successful.")
+        c.booking_id = random.randint(100000, 999999)
+
+        # Persist booked seats for that show
+        key = (c.movie.get(), c.showtime.get())
+        self.controller.booked_seats.setdefault(key, set()).update(c.selected_seats)
+
+        c.show("TicketPage")
+
+
+class TicketPage(tb.Frame):
+    def __init__(self, parent, controller: App):
+        super().__init__(parent)
+        self.controller = controller
+
+        tb.Label(self, text="🎉 Booking Confirmed!", font=("Arial Black", 20), bootstyle="success").pack(pady=16)
+
+        self.ticket_lbl = tb.Label(self, text="", font=("Consolas", 11), justify="left")
+        self.ticket_lbl.pack(pady=8)
+
+        self.qr_label = tb.Label(self)
+        self.qr_label.pack(pady=10)
+
+        btns = tb.Frame(self); btns.pack(pady=16)
+        tb.Button(btns, text="Book Another Ticket", bootstyle="info",
+                  command=lambda: controller.show("WelcomePage")).pack(side="left", padx=6)
+        tb.Button(btns, text="Exit", bootstyle="danger", command=self.controller.destroy).pack(side="left", padx=6)
+
+    def on_show(self):
+        c = self.controller
+        snack_lines = [f"{name} x{c.snack_qty[name].get()}" for name in SNACK_PRICES if c.snack_qty[name].get() > 0]
+        snack_text = ", ".join(snack_lines) if snack_lines else "None"
+
+        ticket_text = (
+            f"--- ASIAN CINEMAS TICKET ---\n"
+            f"Booking ID : {c.booking_id}\n"
+            f"Movie      : {c.movie.get()}\n"
+            f"Showtime   : {c.showtime.get()}\n"
+            f"Tickets    : {c.tickets.get()} (₹{TICKET_PRICE} each)\n"
+            f"Seats      : {', '.join(c.selected_seats)}\n"
+            f"Snacks     : {snack_text}\n"
+            f"Payment    : {c.payment_mode.get()}\n"
+            f"Total Cost : ₹{c.total_cost()}\n"
+            f"Thank you for booking with ASIAN CINEMAS!"
+        )
+        self.ticket_lbl.config(text=ticket_text)
+
+        # Generate & show QR
+        img = qrcode.make(ticket_text)
+        img = img.resize((220, 220))
+        self.qr_imgtk = ImageTk.PhotoImage(img)
+        self.qr_label.config(image=self.qr_imgtk)
+
+
+# ---------- RUN ----------
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
