@@ -1,4 +1,4 @@
-
+#Movie Ticket Booking System
 This project is a desktop-based movie ticket booking application developed using Python, Tkinter, ttkbootstrap, PIL, and QRCode. It simulates a real cinema booking workflow with a clean and modern interface.
 The system includes multiple pages such as:
 Movie & showtime selection
